@@ -1,4 +1,4 @@
-i<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
@@ -42,11 +42,11 @@ i<!DOCTYPE html>
         import { createRoot } from 'react-dom/client';
         import { initializeApp } from 'firebase/app';
         import { getAuth, onAuthStateChanged, signInAnonymously } from 'firebase/auth';
-        import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, serverTimestamp } from 'firebase/firestore';
+        import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, serverTimestamp, writeBatch } from 'firebase/firestore';
         import { 
             Building2, Search, Plus, Globe, Trash2, Edit2, ExternalLink, 
             Save, X, Briefcase, LayoutDashboard, Filter, TrendingUp, 
-            Newspaper, FileText, BarChart2
+            Newspaper, FileText, BarChart2, ArrowUp, ArrowDown
         } from 'lucide-react';
 
         // ---------------------------------------------------------
@@ -117,8 +117,16 @@ i<!DOCTYPE html>
                 
                 const unsubscribeSnapshot = onSnapshot(q, (snapshot) => {
                     const loadedCompanies = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    // 更新日時順（新しい順）
-                    loadedCompanies.sort((a, b) => (b.createdAt?.toMillis() || 0) - (a.createdAt?.toMillis() || 0));
+                    
+                    // 並び替えロジックの変更:
+                    // 'order' フィールドがある場合はそれを使用、なければ 'createdAt' を使用
+                    // 降順（大きい数字＝新しい＝上）で表示
+                    loadedCompanies.sort((a, b) => {
+                        const orderA = a.order ?? a.createdAt?.toMillis() ?? 0;
+                        const orderB = b.order ?? b.createdAt?.toMillis() ?? 0;
+                        return orderB - orderA;
+                    });
+                    
                     setCompanies(loadedCompanies);
                     setLoading(false);
                 }, (error) => {
@@ -137,7 +145,12 @@ i<!DOCTYPE html>
                     if (editingId) {
                         await updateDoc(doc(collectionRef, editingId), { ...formData, updatedAt: serverTimestamp() });
                     } else {
-                        await addDoc(collectionRef, { ...formData, createdAt: serverTimestamp() });
+                        // 新規作成時は、現在の時刻（ミリ秒）をorderとしてセットし、一番上に来るようにする
+                        await addDoc(collectionRef, { 
+                            ...formData, 
+                            createdAt: serverTimestamp(),
+                            order: Date.now() 
+                        });
                     }
                     closeModal();
                 } catch (err) {
@@ -151,6 +164,49 @@ i<!DOCTYPE html>
                 if (!user || !window.confirm('削除しますか？')) return;
                 try { await deleteDoc(doc(db, 'users', user.uid, 'companies', id)); } 
                 catch (err) { console.error(err); }
+            };
+
+            // 順序入れ替え処理
+            const moveStock = async (index, direction) => {
+                if (!user) return;
+                
+                // フィルタリング中は並べ替えを無効化（混乱を防ぐため）
+                if (searchTerm || statusFilter !== 'all') {
+                    alert('並べ替えは、検索・フィルタを解除してから行ってください。');
+                    return;
+                }
+
+                const targetIndex = direction === 'up' ? index - 1 : index + 1;
+                if (targetIndex < 0 || targetIndex >= companies.length) return;
+
+                const currentItem = companies[index];
+                const targetItem = companies[targetIndex];
+
+                // order値を取得（なければ作成日時を代用）
+                const getOrder = (item) => item.order ?? item.createdAt?.toMillis() ?? 0;
+                
+                let order1 = getOrder(currentItem);
+                let order2 = getOrder(targetItem);
+
+                // もし値が同じだった場合の安全策
+                if (order1 === order2) {
+                    order1 = order1 - 1; 
+                }
+
+                try {
+                    // バッチ書き込みで2つのデータを同時に更新
+                    const batch = writeBatch(db);
+                    const colRef = collection(db, 'users', user.uid, 'companies');
+                    
+                    // 値を入れ替える
+                    batch.update(doc(colRef, currentItem.id), { order: order2 });
+                    batch.update(doc(colRef, targetItem.id), { order: order1 });
+                    
+                    await batch.commit();
+                } catch (err) {
+                    console.error("Move Error:", err);
+                    alert("移動に失敗しました");
+                }
             };
 
             const openModal = (company) => {
@@ -254,9 +310,34 @@ i<!DOCTYPE html>
                             </div>
                         ) : (
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                                {filteredCompanies.map((company) => (
-                                    <div key={company.id} className="bg-white rounded-xl p-5 shadow-sm border border-slate-100 hover:shadow-md transition-shadow group flex flex-col h-full">
-                                        <div className="flex justify-between items-start mb-4">
+                                {filteredCompanies.map((company, index) => (
+                                    <div key={company.id} className="bg-white rounded-xl p-5 shadow-sm border border-slate-100 hover:shadow-md transition-shadow group flex flex-col h-full relative">
+                                        
+                                        {/* 並べ替えボタン (フィルタリングしていない時のみ表示) */}
+                                        {statusFilter === 'all' && !searchTerm && (
+                                            <div className="absolute right-2 top-16 flex flex-col space-y-1">
+                                                {index > 0 && (
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); moveStock(index, 'up'); }}
+                                                        className="p-1.5 bg-slate-50 hover:bg-slate-100 text-slate-400 hover:text-indigo-600 rounded-full border border-slate-200 shadow-sm transition-colors"
+                                                        title="上へ"
+                                                    >
+                                                        <ArrowUp className="h-4 w-4" />
+                                                    </button>
+                                                )}
+                                                {index < filteredCompanies.length - 1 && (
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); moveStock(index, 'down'); }}
+                                                        className="p-1.5 bg-slate-50 hover:bg-slate-100 text-slate-400 hover:text-indigo-600 rounded-full border border-slate-200 shadow-sm transition-colors"
+                                                        title="下へ"
+                                                    >
+                                                        <ArrowDown className="h-4 w-4" />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        <div className="flex justify-between items-start mb-4 pr-8">
                                             <div className="flex items-start space-x-3 overflow-hidden">
                                                 <div className="mt-1 p-2 bg-slate-100 rounded-lg text-slate-600 font-mono font-bold tracking-wider text-sm shrink-0">{company.code || '----'}</div>
                                                 <div className="min-w-0">
